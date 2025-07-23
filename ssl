@@ -1,0 +1,148 @@
+import torch
+import timm
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import transforms, datasets
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+import matplotlib.pyplot as plt
+
+# 1. Set device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
+# 2. Load Swin Transformer and Initialize Teacher-Student Models
+mname = "swin_tiny_patch4_window7_224"  # ~28M params
+student = timm.create_model(mname, img_size=224, num_classes=0, pretrained=False).to(device)
+teacher = timm.create_model(mname, img_size=224, num_classes=0, pretrained=False).to(device)
+
+# Teacher model with frozen parameters
+teacher.load_state_dict(student.state_dict())
+for p in teacher.parameters(): 
+    p.requires_grad = False
+
+# 3. DINOv2 Model Definition (Swin Transformer as Backbone)
+class DINOv2Swin(nn.Module):
+    def __init__(self, swin_model_name="swin_tiny_patch4_window7_224"):
+        super(DINOv2Swin, self).__init__()
+        # Load Swin Transformer as backbone
+        self.swin_transformer = timm.create_model(swin_model_name, pretrained=False, num_classes=0)  # No head
+        self.projection_head = nn.Sequential(
+            nn.Linear(self.swin_transformer.num_features, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128)
+        )
+
+    def forward(self, x):
+        # Pass through the Swin Transformer backbone
+        features = self.swin_transformer(x)
+        # Pass through projection head
+        projection = self.projection_head(features)
+        return projection
+
+# Initialize the model
+model = DINOv2Swin(swin_model_name="swin_tiny_patch4_window7_224").to(device)
+
+# 4. Data Loading and Transformation
+transform_train = transforms.Compose([
+    transforms.RandomResizedCrop(224),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),  # Ensure to convert images to tensors
+    transforms.Normalize(mean=[0.5], std=[0.5]),
+])
+
+# Update Dataset Loading: Ensure the images are correctly transformed into tensors
+DATASET_PATH = '/kaggle/input/kidney/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone'
+dataset = datasets.ImageFolder(root=DATASET_PATH, transform=transform_train)
+
+train_loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4)
+
+# 5. Optimizer and Loss
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# Contrastive loss function for DINOv2
+def contrastive_loss(x1, x2, temperature=0.07):
+    similarity = torch.mm(x1, x2.T) / temperature
+    labels = torch.arange(x1.size(0)).long().to(device)
+    loss = nn.CrossEntropyLoss()(similarity, labels)
+    return loss
+
+# 6. Training Function for DINOv2
+def train_dino(model, train_loader, optimizer, epochs=10):
+    model.train()
+    losses = []
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for i, (imgs, _) in enumerate(train_loader):
+            imgs = imgs.to(device)
+
+            # Apply augmentations (already handled in transform_train)
+            augmented_imgs_1 = imgs
+            augmented_imgs_2 = imgs
+
+            optimizer.zero_grad()
+
+            # Forward pass through DINOv2 (Swin Transformer with projection head)
+            projection_1 = model(augmented_imgs_1)
+            projection_2 = model(augmented_imgs_2)
+
+            # Compute contrastive loss
+            loss = contrastive_loss(projection_1, projection_2)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        epoch_loss = running_loss / len(train_loader)
+        losses.append(epoch_loss)
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {epoch_loss:.4f}")
+
+    return losses
+
+# 7. Evaluation Function
+def evaluate(model, data_loader):
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for imgs, labels in data_loader:
+            imgs = imgs.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(imgs)
+            _, preds = torch.max(outputs, 1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision = precision_score(all_labels, all_preds, average='weighted')
+    recall = recall_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+
+    return accuracy, precision, recall, f1
+
+# 8. Training and Evaluation
+ssl_losses = train_dino(model, train_loader, optimizer, epochs=10)
+accuracy, precision, recall, f1 = evaluate(model, train_loader)
+
+# 9. Plot Loss Curve for SSL
+plt.plot(ssl_losses)
+plt.title('DINOv2 Swin SSL Training Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.show()
+
+# 10. Plot Evaluation Metrics
+metrics = [accuracy, precision, recall, f1]
+metrics_labels = ['Accuracy', 'Precision', 'Recall', 'F1 Score']
+
+plt.bar(metrics_labels, metrics)
+plt.title('Evaluation Metrics')
+plt.show()
