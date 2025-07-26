@@ -24,3 +24,15 @@ for X-Ray).
 to-end.
 
 • Compare metrics against the supervised baseline.
+4. Visualisation & Analysis
+• Loss curves for both pipelines in a single plot.
+• Bar chart or table summarising precision, recall, F1.
+• 1-2 Grad-CAM/attention maps illustrating model focus (optional bonus).
+
+2
+
+4. Deliverables
+• Notebook Swin_SSL_CSE521.ipynb — runs end-to-end on a free Colab GPU.
+• Checkpoints — best validation epoch for (i) supervised Swin, (ii) Swin + SSL.
+• README.md — reproduce instructions, SSL method description, group member list.
+Bundle files as Group_ID _SwinSSL.zip and upload to the LMS before the deadline.
