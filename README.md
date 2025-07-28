@@ -2,27 +2,27 @@
 This project draws inspiration from several excellent implementations and experiments shared by the Kaggle community. A heartfelt thank you to the authors of the following notebooks for their contributions and insights:
 
 Mean Teacher with Swin Transformer
-View on Kaggle
+https://www.kaggle.com/code/aritra5101999/mean-teacher-with-swin-backbone/comments?scriptVersionId=252458326
 
 A great implementation of the Mean Teacher semi-supervised learning method using a Swin Transformer backbone.
 
 FixMatch with Swin Transformer
-View on Kaggle
+https://www.kaggle.com/code/ari7889/fixmatch-with-swin-transformer
 
 This notebook inspired the use of FixMatch with modern transformer-based vision backbones.
 
 Swin Transformer Supervised
-View on Kaggle
-
+https://www.kaggle.com/code/ari7889/swin-transformer-supervised/comments?scriptVersionId=252426681
 A clean and simple supervised training pipeline using the Swin Transformer architecture.
 
 Swin DINOv2 Final
-View on Kaggle
+https://www.kaggle.com/code/shamskarib/swin-dinov2final?scriptVersionId=252494025
+
 
 Insightful use of Swin as a backbone with DINOv2-style self-supervised learning.
 
 ViT DINOv2 Final
-View on Kaggle
+https://www.kaggle.com/code/karib123/vit-dinov2last?scriptVersionId=252494173
 
 A strong baseline using Vision Transformer and DINOv2 for representation learning.
 
