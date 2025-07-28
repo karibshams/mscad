@@ -1,0 +1,269 @@
+!pip install captum
+
+# === Imports ===
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, random_split
+from sklearn.metrics import classification_report
+from timm import create_model
+import matplotlib.pyplot as plt
+import numpy as np
+import warnings
+warnings.filterwarnings("ignore")
+
+# === Configuration ===
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+NUM_CLASSES = 4
+BATCH_SIZE = 32
+EPOCHS_PRE = 20
+EPOCHS_FINETUNE = 30
+LR_PRE = 5e-4
+LR_FINETUNE = 1e-4
+class_names = ['Cyst', 'Normal', 'Stone', 'Tumor']
+
+# === Transforms ===
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.5], [0.5])
+])
+
+# === Dataset ===
+dataset = datasets.ImageFolder(
+    root='/kaggle/input/swindinov2/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone',
+    transform=transform
+)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+# === Backbone ===
+def get_swin_backbone():
+    model = create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=0)
+    return model
+
+# === Projection Head ===
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim=256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 1024),
+            nn.GELU(),
+            nn.Linear(1024, out_dim)
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+# === DINOv2 Student-Teacher Model ===
+class DINOv2Model(nn.Module):
+    def __init__(self, backbone, projection_dim=256):
+        super().__init__()
+        self.student_backbone = backbone
+        self.teacher_backbone = get_swin_backbone()
+        self.student_head = DINOHead(1024, projection_dim)
+        self.teacher_head = DINOHead(1024, projection_dim)
+        for p in self.teacher_backbone.parameters():
+            p.requires_grad = False
+        for p in self.teacher_head.parameters():
+            p.requires_grad = False
+
+    def forward(self, x):
+        student_feat = self.student_backbone(x)
+        teacher_feat = self.teacher_backbone(x).detach()
+        return self.student_head(student_feat), self.teacher_head(teacher_feat)
+
+# === EMA Update ===
+def update_teacher(student_model, teacher_model, momentum=0.996):
+    for param_s, param_t in zip(student_model.parameters(), teacher_model.parameters()):
+        param_t.data = momentum * param_t.data + (1. - momentum) * param_s.data
+
+# === DINOv2 Loss with Centering and Temperature ===
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim=256, teacher_temp=0.04, student_temp=0.1, center_momentum=0.9):
+        super().__init__()
+        self.teacher_temp = teacher_temp
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.center = torch.zeros(1, out_dim).to(DEVICE)
+
+    def forward(self, student_out, teacher_out):
+        student_out = F.log_softmax(student_out / self.student_temp, dim=-1)
+        teacher_out = F.softmax((teacher_out - self.center) / self.teacher_temp, dim=-1)
+        loss = torch.sum(-teacher_out * student_out, dim=-1).mean()
+        self.update_center(teacher_out)
+        return loss
+
+    def update_center(self, teacher_out):
+        batch_center = torch.mean(teacher_out, dim=0, keepdim=True)
+        self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+# === Pretraining ===
+def pretrain_dinov2(model, loader, epochs):
+    model.train()
+    optimizer = torch.optim.AdamW(model.student_backbone.parameters(), lr=LR_PRE)
+    head_optimizer = torch.optim.AdamW(model.student_head.parameters(), lr=LR_PRE)
+    criterion = DINOLoss().to(DEVICE)
+    for epoch in range(epochs):
+        total_loss = 0
+        for x, _ in loader:
+            x = x.to(DEVICE)
+            student_out, teacher_out = model(x)
+            loss = criterion(student_out, teacher_out)
+            optimizer.zero_grad()
+            head_optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            head_optimizer.step()
+            update_teacher(model.student_backbone, model.teacher_backbone)
+            update_teacher(model.student_head, model.teacher_head)
+            total_loss += loss.item()
+        print(f"[Pretrain Epoch {epoch+1}/{epochs}] Loss: {total_loss / len(loader):.4f}")
+    torch.save(model.student_backbone.state_dict(), "swin_pretrained.pth")
+
+# === Fine-tuning Classifier ===
+class Classifier(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        self.head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, NUM_CLASSES)
+        )
+
+    def forward(self, x):
+        x = self.backbone(x)
+        return self.head(x)
+
+# === Fine-tuning ===
+def finetune(model, train_loader, val_loader, epochs):
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR_FINETUNE)
+    best_acc = 0.0
+    for epoch in range(epochs):
+        model.train()
+        correct, total = 0, 0
+        for x, y in train_loader:
+            x, y = x.to(DEVICE), y.to(DEVICE)
+            out = model(x)
+            loss = criterion(out, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            pred = out.argmax(1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+        acc = correct / total
+
+        # Validation
+        model.eval()
+        val_correct, val_total = 0, 0
+        with torch.no_grad():
+            for x, y in val_loader:
+                x, y = x.to(DEVICE), y.to(DEVICE)
+                out = model(x)
+                pred = out.argmax(1)
+                val_correct += (pred == y).sum().item()
+                val_total += y.size(0)
+        val_acc = val_correct / val_total
+        if val_acc > best_acc:
+            best_acc = val_acc
+            torch.save(model.state_dict(), "finetuned_classifier.pth")
+        print(f"[Finetune Epoch {epoch+1}/{epochs}] Train Acc: {acc:.4f}, Val Acc: {val_acc:.4f}")
+
+# === MAIN ===
+if __name__ == "__main__":
+    print("Initializing DINOv2 Pretraining...")
+    backbone = get_swin_backbone()
+    dinov2_model = DINOv2Model(backbone).to(DEVICE)
+    pretrain_dinov2(dinov2_model, train_loader, EPOCHS_PRE)
+
+    print("Fine-tuning Classifier...")
+    backbone.load_state_dict(torch.load("swin_pretrained.pth"))
+    classifier = Classifier(backbone.to(DEVICE)).to(DEVICE)
+    finetune(classifier, train_loader, val_loader, EPOCHS_FINETUNE)
+
+    print("Final Evaluation...")
+    classifier.load_state_dict(torch.load("finetuned_classifier.pth"))
+    classifier.eval()
+    preds, labels = [], []
+    with torch.no_grad():
+        for x, y in val_loader:
+            x = x.to(DEVICE)
+            out = classifier(x).argmax(1)
+            preds += out.cpu().tolist()
+            labels += y.tolist()
+    print("\n=== Final Classification Report ===")
+    print(classification_report(labels, preds, target_names=class_names))
+Initializing DINOv2 Pretraining...
+model.safetensors:   0%|          | 0.00/353M [00:00<?, ?B/s]
+[Pretrain Epoch 1/20] Loss: 5.3077
+[Pretrain Epoch 2/20] Loss: 4.5868
+[Pretrain Epoch 3/20] Loss: 3.5033
+[Pretrain Epoch 4/20] Loss: 2.9799
+[Pretrain Epoch 5/20] Loss: 2.5909
+[Pretrain Epoch 6/20] Loss: 2.1984
+[Pretrain Epoch 7/20] Loss: 1.6835
+[Pretrain Epoch 8/20] Loss: 1.2277
+[Pretrain Epoch 9/20] Loss: 0.8730
+[Pretrain Epoch 10/20] Loss: 0.5721
+[Pretrain Epoch 11/20] Loss: 0.4276
+[Pretrain Epoch 12/20] Loss: 0.3200
+[Pretrain Epoch 13/20] Loss: 0.2427
+[Pretrain Epoch 14/20] Loss: 0.2334
+[Pretrain Epoch 15/20] Loss: 0.1941
+[Pretrain Epoch 16/20] Loss: 0.2380
+[Pretrain Epoch 17/20] Loss: 0.1714
+[Pretrain Epoch 18/20] Loss: 0.1737
+[Pretrain Epoch 19/20] Loss: 0.1596
+[Pretrain Epoch 20/20] Loss: 0.1739
+Fine-tuning Classifier...
+[Finetune Epoch 1/30] Train Acc: 0.6942, Val Acc: 0.7590
+[Finetune Epoch 2/30] Train Acc: 0.7946, Val Acc: 0.8289
+[Finetune Epoch 3/30] Train Acc: 0.8627, Val Acc: 0.8952
+[Finetune Epoch 4/30] Train Acc: 0.8944, Val Acc: 0.9177
+[Finetune Epoch 5/30] Train Acc: 0.9194, Val Acc: 0.9470
+[Finetune Epoch 6/30] Train Acc: 0.9415, Val Acc: 0.9618
+[Finetune Epoch 7/30] Train Acc: 0.9529, Val Acc: 0.9747
+[Finetune Epoch 8/30] Train Acc: 0.9635, Val Acc: 0.9711
+[Finetune Epoch 9/30] Train Acc: 0.9730, Val Acc: 0.9843
+[Finetune Epoch 10/30] Train Acc: 0.9752, Val Acc: 0.9884
+[Finetune Epoch 11/30] Train Acc: 0.9774, Val Acc: 0.9916
+[Finetune Epoch 12/30] Train Acc: 0.9829, Val Acc: 0.9896
+[Finetune Epoch 13/30] Train Acc: 0.9806, Val Acc: 0.9936
+[Finetune Epoch 14/30] Train Acc: 0.9852, Val Acc: 0.9936
+[Finetune Epoch 15/30] Train Acc: 0.9876, Val Acc: 0.9944
+[Finetune Epoch 16/30] Train Acc: 0.9875, Val Acc: 0.9920
+[Finetune Epoch 17/30] Train Acc: 0.9818, Val Acc: 0.9920
+[Finetune Epoch 18/30] Train Acc: 0.9857, Val Acc: 0.9956
+[Finetune Epoch 19/30] Train Acc: 0.9880, Val Acc: 0.9968
+[Finetune Epoch 20/30] Train Acc: 0.9896, Val Acc: 0.9936
+[Finetune Epoch 21/30] Train Acc: 0.9905, Val Acc: 0.9972
+[Finetune Epoch 22/30] Train Acc: 0.9942, Val Acc: 0.9964
+[Finetune Epoch 23/30] Train Acc: 0.9912, Val Acc: 0.9916
+[Finetune Epoch 24/30] Train Acc: 0.9876, Val Acc: 0.9960
+[Finetune Epoch 25/30] Train Acc: 0.9933, Val Acc: 0.9968
+[Finetune Epoch 26/30] Train Acc: 0.9914, Val Acc: 0.9964
+[Finetune Epoch 27/30] Train Acc: 0.9906, Val Acc: 0.9976
+[Finetune Epoch 28/30] Train Acc: 0.9915, Val Acc: 0.9964
+[Finetune Epoch 29/30] Train Acc: 0.9950, Val Acc: 0.9976
+[Finetune Epoch 30/30] Train Acc: 0.9943, Val Acc: 0.9992
+Final Evaluation...
+
+=== Final Classification Report ===
+              precision    recall  f1-score   support
+
+        Cyst       1.00      1.00      1.00       732
+      Normal       1.00      1.00      1.00      1022
+       Stone       1.00      1.00      1.00       278
+       Tumor       1.00      1.00      1.00       458
+
+    accuracy                           1.00      2490
+   macro avg       1.00      1.00      1.00      2490
+weighted avg       1.00      1.00      1.00      2490
