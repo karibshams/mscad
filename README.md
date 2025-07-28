@@ -1,38 +1,30 @@
-1. Objective
-Implement and benchmark two pipelines on your assigned medical-imaging dataset:
-1. A supervised Swin Transformer baseline.
+📚 References & Inspirations
+This project draws inspiration from several excellent implementations and experiments shared by the Kaggle community. A heartfelt thank you to the authors of the following notebooks for their contributions and insights:
 
-2. A Swin Transformer + Self-Supervised Learning (SSL) variant using any well-
-motivated SSL technique (e.g. SimCLR, BYOL, MoCo v3, DINO, Mean Teacher, Mix-
-Match, FixMatch, . . . ).
+Mean Teacher with Swin Transformer
+View on Kaggle
 
+A great implementation of the Mean Teacher semi-supervised learning method using a Swin Transformer backbone.
 
-3. Tasks & Notebook Requirements
-1. Data Pre-processing
-• Resizing, normalisation, class-balancing techniques.
-• Optionally include domain-specific augmentations (e.g. adaptive histogram equalisation
-for X-Ray).
-2. Baseline: Swin Transformer (Supervised)
-• Use any timm Swin variant (swin_tiny_patch4_window7_224 or larger).
-• Fine-tune with mixed-precision (torch.cuda.amp).
-• Log train & validation loss, precision, recall, F1.
-3. Swin Transformer + SSL
-• Pre-train the backbone with one SSL algorithm of your choice on the unlabelled portion
-(or on labelled data without labels).
+FixMatch with Swin Transformer
+View on Kaggle
 
-• Either (a) frozen-backbone linear probe or (b) fine-tune the SSL-initialised model end-
-to-end.
+This notebook inspired the use of FixMatch with modern transformer-based vision backbones.
 
-• Compare metrics against the supervised baseline.
-4. Visualisation & Analysis
-• Loss curves for both pipelines in a single plot.
-• Bar chart or table summarising precision, recall, F1.
-• 1-2 Grad-CAM/attention maps illustrating model focus (optional bonus).
+Swin Transformer Supervised
+View on Kaggle
 
-2
+A clean and simple supervised training pipeline using the Swin Transformer architecture.
 
-4. Deliverables
-• Notebook Swin_SSL_CSE521.ipynb — runs end-to-end on a free Colab GPU.
-• Checkpoints — best validation epoch for (i) supervised Swin, (ii) Swin + SSL.
-• README.md — reproduce instructions, SSL method description, group member list.
-Bundle files as Group_ID _SwinSSL.zip and upload to the LMS before the deadline.
+Swin DINOv2 Final
+View on Kaggle
+
+Insightful use of Swin as a backbone with DINOv2-style self-supervised learning.
+
+ViT DINOv2 Final
+View on Kaggle
+
+A strong baseline using Vision Transformer and DINOv2 for representation learning.
+
+These notebooks provided valuable guidance and ideas that helped shape the direction of this project. Please check them out and support the original authors.
+
